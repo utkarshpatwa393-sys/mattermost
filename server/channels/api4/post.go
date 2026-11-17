@@ -6,6 +6,7 @@ package api4
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -516,6 +517,15 @@ func getFlaggedPostsForUser(c *Context, w http.ResponseWriter, r *http.Request) 
 	channelId := r.URL.Query().Get("channel_id")
 	teamId := r.URL.Query().Get("team_id")
 
+	if c.Params.PerPage == 0 {
+		c.SetInvalidURLParam("per_page")
+		return
+	}
+	if c.Params.Page < 0 || c.Params.Page > math.MaxInt/c.Params.PerPage {
+		c.SetInvalidURLParam("page")
+		return
+	}
+
 	var posts *model.PostList
 	var err *model.AppError
 
@@ -550,7 +560,12 @@ func getFlaggedPostsForUser(c *Context, w http.ResponseWriter, r *http.Request) 
 	channelReadPermission := make(map[string]bool)
 	isMemberForAllPosts := true
 
-	for _, post := range posts.Posts {
+	for _, postID := range posts.Order {
+		post, ok := posts.Posts[postID]
+		if !ok {
+			continue
+		}
+
 		allowed, ok := channelReadPermission[post.ChannelId]
 
 		if !ok {
@@ -581,8 +596,8 @@ func getFlaggedPostsForUser(c *Context, w http.ResponseWriter, r *http.Request) 
 	// Saved posts are sorted newest first, so once the history limit hides one, every later page is hidden too.
 	hasNext := model.SafeDereference(posts.HasNext) && posts.FirstInaccessiblePostTime == 0
 	pl.HasNext = &hasNext
+	pl.FirstInaccessiblePostTime = posts.FirstInaccessiblePostTime
 
-	pl.SortByCreateAt()
 	clientPostList := c.App.PreparePostListForClient(c.AppContext, pl, nil)
 	clientPostList, isMemberForAllPreviews, err := c.App.SanitizePostListMetadataForUser(c.AppContext, clientPostList, c.AppContext.Session().UserId)
 	if err != nil {

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -4098,6 +4099,60 @@ func TestGetFlaggedPostsForUserPaging(t *testing.T) {
 			assert.ElementsMatch(t, all.Order, paged)
 		})
 	}
+
+	t.Run("invalid paging", func(t *testing.T) {
+		for _, tc := range []struct {
+			name          string
+			page, perPage int
+		}{
+			{"negative page", -1, 3},
+			{"zero per page", 0, 0},
+			{"overflowing offset", math.MaxInt / 100, 200},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				_, resp, err := client.GetFlaggedPostsForUser(context.Background(), user.Id, tc.page, tc.perPage)
+				require.Error(t, err)
+				CheckBadRequestStatus(t, resp)
+			})
+		}
+	})
+}
+
+func TestGetFlaggedPostsForUserTiedCreateAt(t *testing.T) {
+	mainHelper.Parallel(t)
+
+	th := Setup(t).InitBasic(t)
+	client := th.Client
+	user := th.BasicUser
+
+	createAt := model.GetMillis()
+	var ids []string
+	preferences := model.Preferences{}
+	for range 5 {
+		post, err := th.App.Srv().Store().Post().Save(th.Context, &model.Post{
+			UserId:    user.Id,
+			ChannelId: th.BasicChannel.Id,
+			Message:   "tied",
+			CreateAt:  createAt,
+		})
+		require.NoError(t, err)
+		ids = append(ids, post.Id)
+		preferences = append(preferences, model.Preference{
+			UserId:   user.Id,
+			Category: model.PreferenceCategoryFlaggedPost,
+			Name:     post.Id,
+			Value:    "true",
+		})
+	}
+	_, err := client.UpdatePreferences(context.Background(), user.Id, preferences)
+	require.NoError(t, err)
+
+	slices.Sort(ids)
+	slices.Reverse(ids)
+
+	rpl, _, err := client.GetFlaggedPostsForUser(context.Background(), user.Id, 0, 10)
+	require.NoError(t, err)
+	assert.Equal(t, ids, rpl.Order)
 }
 
 func TestGetFlaggedPostsForUserHasNextWithHistoryLimit(t *testing.T) {
@@ -4139,6 +4194,7 @@ func TestGetFlaggedPostsForUserHasNextWithHistoryLimit(t *testing.T) {
 	assert.Equal(t, []string{newest.Id}, rpl.Order)
 	require.NotNil(t, rpl.HasNext)
 	assert.False(t, *rpl.HasNext)
+	assert.Equal(t, posts[len(posts)-2].CreateAt, rpl.FirstInaccessiblePostTime)
 }
 
 func TestGetPostsBefore(t *testing.T) {
