@@ -47,6 +47,32 @@ describe('Actions.Search', () => {
         expect(getState().entities.search.flaggedPaging).toMatchObject({page: 1, isEnd: true});
     });
 
+    it('getMissingFlaggedPosts loads only the saved posts not already loaded', async () => {
+        const channelId = TestHelper.basicChannel!.id;
+        const userId = TestHelper.basicUser!.id;
+        store = configureStore({
+            entities: {
+                channels: {
+                    channels: {[channelId]: TestHelper.basicChannel!},
+                    myMembers: {[channelId]: TestHelper.basicChannelMember!},
+                    membersInChannel: {[channelId]: {}},
+                },
+                posts: {posts: {loaded: TestHelper.getPostMock({id: 'loaded'})}},
+                users: {currentUserId: userId, statuses: {[userId]: 'online'}},
+            },
+        });
+        const missing = TestHelper.getPostMock({id: 'missing', channel_id: channelId, user_id: userId});
+
+        nock(Client4.getPostsRoute()).
+            post('/ids', ['missing']).
+            reply(200, [missing]);
+
+        await store.dispatch(Actions.getMissingFlaggedPosts(['loaded', 'missing']));
+
+        expect(store.getState().entities.posts.posts.missing).toEqual(missing);
+        expect(nock.isDone()).toBe(true);
+    });
+
     it('Perform Search', async () => {
         const {dispatch, getState} = store;
 

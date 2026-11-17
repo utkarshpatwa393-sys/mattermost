@@ -7,7 +7,7 @@ import type {FileSearchResults, FileSearchResultItem} from '@mattermost/types/fi
 import type {PaginatedPostList, PostList, PostSearchResults} from '@mattermost/types/posts';
 import type {SearchParameter} from '@mattermost/types/search';
 
-import {SearchTypes} from 'mattermost-redux/action_types';
+import {PostTypes, SearchTypes} from 'mattermost-redux/action_types';
 import {Client4} from 'mattermost-redux/client';
 import {getCurrentUserId} from 'mattermost-redux/selectors/entities/users';
 import type {ActionResult, ActionFuncAsync, ThunkActionFunc} from 'mattermost-redux/types/actions';
@@ -276,6 +276,34 @@ export function getFlaggedPosts(page = 0, isGettingMore = page > 0): ActionFuncA
         ], 'SEARCH_FLAGGED_POSTS_BATCH'));
 
         return {data: posts};
+    };
+}
+
+export function getMissingFlaggedPosts(postIds: string[]): ActionFuncAsync {
+    return async (dispatch, getState) => {
+        const loadedPosts = getState().entities.posts.posts;
+        const missingPostIds = postIds.filter((id) => !loadedPosts[id]);
+        if (missingPostIds.length === 0) {
+            return {data: true};
+        }
+
+        let posts;
+        try {
+            posts = await Client4.getPostsByIds(missingPostIds);
+
+            await Promise.all([
+                getMentionsAndStatusesForPosts(posts, dispatch, getState),
+                dispatch(getMissingChannelsFromPosts(Object.fromEntries(posts.map((post) => [post.id, post])))),
+            ]);
+        } catch (error) {
+            forceLogoutIfNecessary(error, dispatch, getState);
+            dispatch(logError(error));
+            return {error};
+        }
+
+        dispatch({type: PostTypes.RECEIVED_POSTS, data: {posts}});
+
+        return {data: true};
     };
 }
 
