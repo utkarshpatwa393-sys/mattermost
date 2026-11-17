@@ -9,12 +9,32 @@ import PagedList from 'components/common/paged_list';
 import {renderWithContext} from 'tests/react_testing_utils';
 
 describe('components/common/PagedList', () => {
+    const OriginalResizeObserver = global.ResizeObserver;
+    let resizeCallbacks: Array<() => void>;
+
+    function resize() {
+        act(() => {
+            resizeCallbacks.forEach((callback) => callback());
+            jest.runAllTimers();
+        });
+    }
+
     beforeEach(() => {
         jest.useFakeTimers();
+        resizeCallbacks = [];
+        global.ResizeObserver = class {
+            constructor(callback: () => void) {
+                resizeCallbacks.push(callback);
+            }
+            observe() {}
+            unobserve() {}
+            disconnect() {}
+        } as unknown as typeof ResizeObserver;
     });
 
     afterEach(() => {
         jest.useRealTimers();
+        global.ResizeObserver = OriginalResizeObserver;
     });
 
     function renderPagedList(props: Partial<React.ComponentProps<typeof PagedList>> = {}) {
@@ -72,14 +92,49 @@ describe('components/common/PagedList', () => {
         expect(onLoadMore).not.toHaveBeenCalled();
     });
 
+    test('should load more once the loading spinner is in view', () => {
+        const {onLoadMore, scroller, container} = renderPagedList();
+
+        Object.defineProperty(container.querySelector('.loading-screen'), 'offsetHeight', {configurable: true, value: 140});
+        setScrollPosition(scroller, {scrollTop: 0, clientHeight: 500, scrollHeight: 600});
+        fireEvent.scroll(scroller);
+        act(() => jest.runAllTimers());
+
+        expect(onLoadMore).toHaveBeenCalledTimes(1);
+    });
+
     test('should only load until full when asked to', () => {
         const {onLoadMore} = renderPagedList();
-        act(() => jest.runAllTimers());
+        resize();
         expect(onLoadMore).not.toHaveBeenCalled();
 
         const {onLoadMore: onLoadMoreUntilFull} = renderPagedList({loadUntilFull: true});
-        act(() => jest.runAllTimers());
+        resize();
         expect(onLoadMoreUntilFull).toHaveBeenCalledTimes(1);
+    });
+
+    test('should not retry a failed page until the list is resized', () => {
+        const {onLoadMore, rerender} = renderPagedList({loadUntilFull: true});
+        resize();
+        expect(onLoadMore).toHaveBeenCalledTimes(1);
+
+        const render = (isLoadingMore: boolean) => rerender(
+            <PagedList
+                hasMore={true}
+                isLoadingMore={isLoadingMore}
+                onLoadMore={onLoadMore}
+                loadUntilFull={true}
+            >
+                <div data-testid='item'/>
+            </PagedList>,
+        );
+        render(true);
+        render(false);
+        act(() => jest.runAllTimers());
+        expect(onLoadMore).toHaveBeenCalledTimes(1);
+
+        resize();
+        expect(onLoadMore).toHaveBeenCalledTimes(2);
     });
 
     test('should show the loading spinner only while there is more to load', () => {

@@ -61,8 +61,24 @@ describe('components/SavedMessages', () => {
         },
     };
 
+    const OriginalResizeObserver = global.ResizeObserver;
+
     beforeEach(() => {
         jest.clearAllMocks();
+
+        // Like a real ResizeObserver, report each element once when observation starts, which jsdom's polyfill skips for zero-sized elements.
+        global.ResizeObserver = class {
+            constructor(private callback: ResizeObserverCallback) {}
+            observe() {
+                this.callback([], this as unknown as ResizeObserver);
+            }
+            unobserve() {}
+            disconnect() {}
+        } as unknown as typeof ResizeObserver;
+    });
+
+    afterEach(() => {
+        global.ResizeObserver = OriginalResizeObserver;
     });
 
     function stateWith(overrides: object) {
