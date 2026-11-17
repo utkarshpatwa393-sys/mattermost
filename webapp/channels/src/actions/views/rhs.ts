@@ -12,6 +12,7 @@ import {getChannel} from 'mattermost-redux/actions/channels';
 import {getPostsByIds, getPost as fetchPost} from 'mattermost-redux/actions/posts';
 import {
     clearSearch,
+    FLAGGED_POSTS_PER_PAGE,
     getFlaggedPosts,
     getPinnedPosts,
     searchPostsWithParams,
@@ -344,17 +345,22 @@ export function showFlaggedPosts(): ActionFuncAsync {
 
 export function getMoreFlaggedPosts(): ActionFuncAsync {
     return async (dispatch, getState) => {
-        const {flaggedPaging, isSearchGettingMore} = getState().entities.search;
+        const {flagged, flaggedPaging, isSearchGettingMore} = getState().entities.search;
         if (flaggedPaging.isEnd || isSearchGettingMore) {
             return {data: true};
         }
 
-        const result = await dispatch(getFlaggedPosts(flaggedPaging.page + 1));
+        // Step back over the saved posts removed since the last page, so the posts that moved up into it aren't skipped.
+        const offset = ((flaggedPaging.page + 1) * FLAGGED_POSTS_PER_PAGE) - flaggedPaging.removed;
+        const page = Math.floor(offset / FLAGGED_POSTS_PER_PAGE);
+
+        const result = await dispatch(getFlaggedPosts(page, true));
         if (!result.data) {
             return {data: false};
         }
 
-        if (result.data.order.length === 0) {
+        const known = new Set(flagged);
+        if (!result.data.order.some((id) => !known.has(id))) {
             return dispatch(getMoreFlaggedPosts());
         }
 

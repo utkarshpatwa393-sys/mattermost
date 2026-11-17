@@ -5,6 +5,7 @@ import {combineReducers} from 'redux';
 
 import type {Post} from '@mattermost/types/posts';
 import type {PreferenceType} from '@mattermost/types/preferences';
+import type {SearchState} from '@mattermost/types/search';
 
 import type {MMReduxAction} from 'mattermost-redux/action_types';
 import {PostTypes, PreferenceTypes, SearchTypes, UserTypes} from 'mattermost-redux/action_types';
@@ -144,7 +145,17 @@ function flagged(state: string[] = [], action: MMReduxAction) {
     }
 }
 
-const initialFlaggedPaging = {page: 0, isEnd: true};
+const initialFlaggedPaging: SearchState['flaggedPaging'] = {page: 0, isEnd: true, loaded: [], removed: 0};
+
+// Saved posts that were loaded and then unsaved or deleted shift every later page on the server.
+function removeLoadedFlaggedPosts(state: SearchState['flaggedPaging'], postIds: string[]) {
+    const loaded = state.loaded.filter((id) => !postIds.includes(id));
+    if (loaded.length === state.loaded.length) {
+        return state;
+    }
+
+    return {...state, loaded, removed: state.removed + (state.loaded.length - loaded.length)};
+}
 
 function flaggedPaging(state = initialFlaggedPaging, action: MMReduxAction) {
     switch (action.type) {
@@ -152,7 +163,19 @@ function flaggedPaging(state = initialFlaggedPaging, action: MMReduxAction) {
         return {
             page: action.page,
             isEnd: !action.data.has_next,
+            loaded: action.isGettingMore ? [...new Set(state.loaded.concat(action.data.order))] : action.data.order,
+            removed: 0,
         };
+    case PreferenceTypes.DELETED_PREFERENCES:
+        return removeLoadedFlaggedPosts(
+            state,
+            (action.data ?? []).
+                filter((pref: PreferenceType) => pref.category === Preferences.CATEGORY_FLAGGED_POST).
+                map((pref: PreferenceType) => pref.name),
+        );
+    case PostTypes.POST_DELETED:
+    case PostTypes.POST_REMOVED:
+        return action.data ? removeLoadedFlaggedPosts(state, [action.data.id]) : state;
     case UserTypes.LOGOUT_SUCCESS:
         return initialFlaggedPaging;
 

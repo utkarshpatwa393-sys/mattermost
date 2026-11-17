@@ -84,6 +84,7 @@ jest.mock('mattermost-redux/actions/search', () => ({
     searchPostsWithParams: (...args: any) => ({type: 'MOCK_SEARCH_POSTS', args}),
     searchFilesWithParams: (...args: any) => ({type: 'MOCK_SEARCH_FILES', args}),
     clearSearch: (...args: any) => ({type: 'MOCK_CLEAR_SEARCH', args}),
+    FLAGGED_POSTS_PER_PAGE: 60,
     getFlaggedPosts: jest.fn(),
     getPinnedPosts: jest.fn(),
 }));
@@ -341,8 +342,12 @@ describe('rhs view actions', () => {
     });
 
     describe('getMoreFlaggedPosts', () => {
-        function savedPostsStore(paging: {page: number; isEnd: boolean}, isSearchGettingMore = false) {
-            const state = set(cloneDeep(initialState), 'entities.search', {flaggedPaging: paging, isSearchGettingMore});
+        function savedPostsStore(paging: {page: number; isEnd: boolean; removed?: number}, isSearchGettingMore = false, flagged: string[] = []) {
+            const state = set(cloneDeep(initialState), 'entities.search', {
+                flagged,
+                flaggedPaging: {loaded: [], removed: 0, ...paging},
+                isSearchGettingMore,
+            });
             return mockStore(state);
         }
 
@@ -372,7 +377,31 @@ describe('rhs view actions', () => {
             await savedStore.dispatch(getMoreFlaggedPosts());
 
             expect(SearchActions.getFlaggedPosts).toHaveBeenCalledTimes(1);
-            expect(SearchActions.getFlaggedPosts).toHaveBeenCalledWith(1);
+            expect(SearchActions.getFlaggedPosts).toHaveBeenCalledWith(1, true);
+        });
+
+        test.each([
+            [0, 1, 0],
+            [2, 1, 2],
+            [1, 61, 0],
+        ])('after page %i with %i saved posts removed, requests page %i', async (currentPage, removed, expectedPage) => {
+            (SearchActions.getFlaggedPosts as jest.Mock).mockReturnValue(() => ({data: page}));
+            const savedStore = savedPostsStore({page: currentPage, isEnd: false, removed});
+
+            await savedStore.dispatch(getMoreFlaggedPosts());
+
+            expect(SearchActions.getFlaggedPosts).toHaveBeenCalledWith(expectedPage, true);
+        });
+
+        test('keeps loading past a page of posts already shown', async () => {
+            (SearchActions.getFlaggedPosts as jest.Mock).
+                mockReturnValueOnce(() => ({data: page})).
+                mockReturnValueOnce(() => ({data: {order: ['post2'], posts: {post2: {id: 'post2'}}, has_next: true}}));
+            const savedStore = savedPostsStore({page: 0, isEnd: false}, false, ['post1']);
+
+            await savedStore.dispatch(getMoreFlaggedPosts());
+
+            expect(SearchActions.getFlaggedPosts).toHaveBeenCalledTimes(2);
         });
 
         test('keeps loading past an empty page', async () => {

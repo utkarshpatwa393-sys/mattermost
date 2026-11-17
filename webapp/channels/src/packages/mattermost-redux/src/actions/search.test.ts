@@ -36,7 +36,7 @@ describe('Actions.Search', () => {
             reply(200, {order: [], posts: {}, has_next: true});
 
         await dispatch(Actions.getFlaggedPosts());
-        expect(getState().entities.search.flaggedPaging).toEqual({page: 0, isEnd: false});
+        expect(getState().entities.search.flaggedPaging).toMatchObject({page: 0, isEnd: false});
 
         nock(Client4.getUsersRoute()).
             get(`/${userId}/posts/flagged`).
@@ -44,7 +44,7 @@ describe('Actions.Search', () => {
             reply(200, {order: [], posts: {}, has_next: false});
 
         await dispatch(Actions.getFlaggedPosts(1));
-        expect(getState().entities.search.flaggedPaging).toEqual({page: 1, isEnd: true});
+        expect(getState().entities.search.flaggedPaging).toMatchObject({page: 1, isEnd: true});
     });
 
     it('Perform Search', async () => {

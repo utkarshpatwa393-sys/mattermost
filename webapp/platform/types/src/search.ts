@@ -14,6 +14,12 @@ export type SearchState = {
     flaggedPaging: {
         page: number;
         isEnd: boolean;
+
+        /** IDs of saved posts fetched so far, to tell which unsaves or deletions shift later pages. */
+        loaded: string[];
+
+        /** How many loaded saved posts were unsaved or deleted since the last page was fetched. */
+        removed: number;
     };
     pinned: Record<string, string[]>;
     isSearchingTerm: boolean;

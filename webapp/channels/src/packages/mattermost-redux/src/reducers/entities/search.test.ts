@@ -3,9 +3,11 @@
 
 import {
     PostTypes,
+    PreferenceTypes,
     SearchTypes,
     UserTypes,
 } from 'mattermost-redux/action_types';
+import {Preferences} from 'mattermost-redux/constants';
 import reducer from 'mattermost-redux/reducers/entities/search';
 
 type SearchState = ReturnType<typeof reducer>;
@@ -349,7 +351,7 @@ describe('reducers.entities.search', () => {
 
             const actualState = reducer({flagged: ['abcd']} as SearchState, action);
             expect(actualState.flagged).toEqual(['efgh']);
-            expect(actualState.flaggedPaging).toEqual({page: 0, isEnd: false});
+            expect(actualState.flaggedPaging).toEqual({page: 0, isEnd: false, loaded: ['efgh'], removed: 0});
         });
 
         it('appends later pages without duplicates', () => {
@@ -360,9 +362,12 @@ describe('reducers.entities.search', () => {
                 isGettingMore: true,
             };
 
-            const actualState = reducer({flagged: ['abcd', 'efgh']} as SearchState, action);
+            const actualState = reducer({
+                flagged: ['abcd', 'efgh'],
+                flaggedPaging: {page: 0, isEnd: false, loaded: ['abcd', 'efgh'], removed: 2},
+            } as SearchState, action);
             expect(actualState.flagged).toEqual(['abcd', 'efgh', 'ijkl']);
-            expect(actualState.flaggedPaging).toEqual({page: 1, isEnd: true});
+            expect(actualState.flaggedPaging).toEqual({page: 1, isEnd: true, loaded: ['abcd', 'efgh', 'ijkl'], removed: 0});
         });
 
         it('treats a missing has_next as the end of the list', () => {
@@ -374,7 +379,26 @@ describe('reducers.entities.search', () => {
             };
 
             const actualState = reducer({} as SearchState, action);
-            expect(actualState.flaggedPaging).toEqual({page: 0, isEnd: true});
+            expect(actualState.flaggedPaging).toEqual({page: 0, isEnd: true, loaded: ['abcd'], removed: 0});
+        });
+
+        describe('counts loaded saved posts that are removed', () => {
+            const flaggedPaging = {page: 0, isEnd: false, loaded: ['abcd', 'efgh'], removed: 0};
+
+            it.each([
+                ['unsaved', {type: PreferenceTypes.DELETED_PREFERENCES, data: [{category: Preferences.CATEGORY_FLAGGED_POST, name: 'abcd'}]}],
+                ['deleted', {type: PostTypes.POST_DELETED, data: {id: 'abcd'}}],
+                ['removed', {type: PostTypes.POST_REMOVED, data: {id: 'abcd'}}],
+            ])('when %s', (_, action) => {
+                const actualState = reducer({flaggedPaging} as SearchState, action);
+                expect(actualState.flaggedPaging).toEqual({...flaggedPaging, loaded: ['efgh'], removed: 1});
+            });
+
+            it('but not posts that were never loaded', () => {
+                const action = {type: PreferenceTypes.DELETED_PREFERENCES, data: [{category: Preferences.CATEGORY_FLAGGED_POST, name: 'ijkl'}]};
+                const actualState = reducer({flaggedPaging} as SearchState, action);
+                expect(actualState.flaggedPaging).toBe(flaggedPaging);
+            });
         });
     });
 

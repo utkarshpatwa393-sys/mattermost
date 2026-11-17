@@ -241,17 +241,18 @@ export function getMoreFilesForSearch(teamId: string): ActionFuncAsync {
     };
 }
 
-export function getFlaggedPosts(page = 0): ActionFuncAsync<PaginatedPostList> {
+export const FLAGGED_POSTS_PER_PAGE = 60;
+
+export function getFlaggedPosts(page = 0, isGettingMore = page > 0): ActionFuncAsync<PaginatedPostList> {
     return async (dispatch, getState) => {
         const state = getState();
         const userId = getCurrentUserId(state);
-        const isGettingMore = page > 0;
 
         dispatch({type: SearchTypes.SEARCH_FLAGGED_POSTS_REQUEST, isGettingMore});
 
         let posts;
         try {
-            posts = await Client4.getFlaggedPosts(userId, '', '', page);
+            posts = await Client4.getFlaggedPosts(userId, '', '', page, FLAGGED_POSTS_PER_PAGE);
 
             await Promise.all([getMentionsAndStatusesForPosts(posts.posts, dispatch, getState), dispatch(getMissingChannelsFromPosts(posts.posts))]);
         } catch (error) {

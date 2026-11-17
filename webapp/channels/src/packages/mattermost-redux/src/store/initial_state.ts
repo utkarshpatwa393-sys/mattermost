@@ -177,6 +177,8 @@ const state: GlobalState = {
             flaggedPaging: {
                 page: 0,
                 isEnd: true,
+                loaded: [],
+                removed: 0,
             },
             pinned: {},
             isSearchingTerm: false,
