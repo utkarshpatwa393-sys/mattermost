@@ -180,10 +180,10 @@ func (a *App) CreateOrUpdateAccessControlPolicy(rctx request.CTX, policy *model.
 		return nil, appErr
 	}
 
-	var systemSettingPolicyBefore *model.AccessControlPolicy
-	systemSettingPolicyBeforeKnown := true
+	var systemSettingChange *systemSettingPolicyChange
 	if policy.Type == model.AccessControlPolicyTypeSystemSetting && a.systemSettingPoliciesEvaluated() {
-		systemSettingPolicyBefore, systemSettingPolicyBeforeKnown = a.systemSettingPolicyBeforeSave(rctx, acs, policy.ID)
+		stored, storedKnown := a.systemSettingPolicyBeforeSave(rctx, acs, policy.ID)
+		systemSettingChange = a.prepareSystemSettingPolicyChange(rctx, stored, storedKnown, policy)
 	}
 
 	policy, appErr = acs.SavePolicy(rctx, policy)
@@ -203,7 +203,7 @@ func (a *App) CreateOrUpdateAccessControlPolicy(rctx request.CTX, policy *model.
 		a.publishPermissionPolicyUpdate(rctx)
 	case model.AccessControlPolicyTypeSystemSetting:
 		a.invalidateSystemSettingPolicyCache()
-		a.pushSystemSettingPolicyChange(rctx, systemSettingPolicyBefore, systemSettingPolicyBeforeKnown, policy)
+		a.publishSystemSettingPolicyChange(rctx, systemSettingChange, policy.ID, policy)
 	}
 
 	return policy, nil
@@ -737,6 +737,11 @@ func (a *App) DeleteAccessControlPolicy(rctx request.CTX, id string) *model.AppE
 		affectedTeamIDs = a.teamPolicyIDsWithImport(rctx, id)
 	}
 
+	var systemSettingChange *systemSettingPolicyChange
+	if policy != nil && policy.Type == model.AccessControlPolicyTypeSystemSetting && a.systemSettingPoliciesEvaluated() {
+		systemSettingChange = a.prepareSystemSettingPolicyChange(rctx, policy, true, nil)
+	}
+
 	if appErr := acs.DeletePolicy(rctx, id); appErr != nil {
 		return appErr
 	}
@@ -759,7 +764,7 @@ func (a *App) DeleteAccessControlPolicy(rctx request.CTX, id string) *model.AppE
 		a.publishPermissionPolicyUpdate(rctx)
 	case policy.Type == model.AccessControlPolicyTypeSystemSetting:
 		a.invalidateSystemSettingPolicyCache()
-		a.pushSystemSettingPolicyChange(rctx, policy, true, nil)
+		a.publishSystemSettingPolicyChange(rctx, systemSettingChange, id, nil)
 	}
 
 	return nil

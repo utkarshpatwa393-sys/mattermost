@@ -17,6 +17,7 @@ import (
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/shared/request"
 	"github.com/mattermost/mattermost/server/v8/channels/store"
+	"github.com/mattermost/mattermost/server/v8/einterfaces"
 )
 
 const systemSettingPolicySearchPageSize = 200
@@ -96,6 +97,27 @@ func (p *cachedSystemSettingPolicy) referencesSessionAttribute(names []string) b
 	return false
 }
 
+func newCachedSystemSettingPolicy(p *model.AccessControlPolicy) cachedSystemSettingPolicy {
+	item := cachedSystemSettingPolicy{
+		ID:                p.ID,
+		Roles:             slices.Clone(p.Roles),
+		Rules:             make([]cachedSystemSettingRule, 0, len(p.Rules)),
+		FieldIDs:          map[string]struct{}{},
+		SessionAttributes: map[string]struct{}{},
+	}
+	for _, r := range p.Rules {
+		if len(r.Actions) != 1 || r.Expression == "" {
+			continue
+		}
+		item.Rules = append(item.Rules, cachedSystemSettingRule{
+			Key:   r.Actions[0],
+			Value: r.Value,
+		})
+		item.addExpressionReferences(r.Expression)
+	}
+	return item
+}
+
 type systemSettingPolicyCache struct {
 	entries    atomic.Pointer[[]cachedSystemSettingPolicy]
 	group      singleflight.Group
@@ -141,24 +163,7 @@ func (c *systemSettingPolicyCache) Get(rctx request.CTX, policyStore store.Acces
 			}
 
 			for _, p := range policies {
-				item := cachedSystemSettingPolicy{
-					ID:                p.ID,
-					Roles:             slices.Clone(p.Roles),
-					Rules:             make([]cachedSystemSettingRule, 0, len(p.Rules)),
-					FieldIDs:          map[string]struct{}{},
-					SessionAttributes: map[string]struct{}{},
-				}
-				for _, r := range p.Rules {
-					if len(r.Actions) != 1 || r.Expression == "" {
-						continue
-					}
-					item.Rules = append(item.Rules, cachedSystemSettingRule{
-						Key:   r.Actions[0],
-						Value: r.Value,
-					})
-					item.addExpressionReferences(r.Expression)
-				}
-				items = append(items, item)
+				items = append(items, newCachedSystemSettingPolicy(p))
 			}
 
 			if len(policies) < systemSettingPolicySearchPageSize {
@@ -246,10 +251,17 @@ func (a *App) evaluateClientConfigOverrides(rctx request.CTX) (map[string]string
 	if err != nil {
 		return nil, false, model.NewAppError("EvaluateClientConfigOverrides", "app.access_control.evaluate_system_settings.app_error", nil, "", http.StatusInternalServerError).Wrap(err)
 	}
+	return a.evaluateClientConfigOverridesForPolicies(rctx, acs, policies)
+}
+
+// evaluateClientConfigOverridesForPolicies evaluates the given policies for
+// the session attached to rctx, which must belong to a user.
+func (a *App) evaluateClientConfigOverridesForPolicies(rctx request.CTX, acs einterfaces.AccessControlServiceInterface, policies []cachedSystemSettingPolicy) (map[string]string, bool, *model.AppError) {
 	if len(policies) == 0 {
 		return map[string]string{}, false, nil
 	}
 
+	session := rctx.Session()
 	systemRole := ResolveSystemRole(session.Roles)
 	candidateRoles := systemSettingRoleChain(systemRole, true)
 	hasCandidate := false

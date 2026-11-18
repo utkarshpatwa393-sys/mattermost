@@ -4,8 +4,10 @@
 package app
 
 import (
+	"errors"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -387,69 +389,83 @@ func TestDiffSystemSettingPolicies(t *testing.T) {
 		otherKey   = "OtherSetting"
 		exprA      = `user.attributes.dept == "a"`
 		exprB      = `user.attributes.dept == "b"`
-		sessionA   = `user.attributes.dept == "a" && user.session.vpn_active == "true"`
 	)
 
 	version := func(role string, rules map[string]systemSettingRuleVersion) *systemSettingPolicyVersion {
 		return &systemSettingPolicyVersion{role: role, rules: rules}
 	}
-	user := func(expr string) systemSettingMatchQuery {
-		return systemSettingMatchQuery{expression: expr, role: model.SystemUserRoleId}
+	userScope := func(expressions ...string) systemSettingPolicyScope {
+		return systemSettingPolicyScope{roles: []string{model.SystemUserRoleId}, expressions: expressions}
 	}
 
 	cases := []struct {
 		name   string
 		before *systemSettingPolicyVersion
 		after  *systemSettingPolicyVersion
-		want   systemSettingAffectedQueries
+		want   systemSettingPolicyScope
+		empty  bool
 	}{
 		{
 			name:   "unchanged roles and rules affect nobody",
 			before: version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{biometrics: {exprA, "true"}}),
 			after:  version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{biometrics: {exprA, "true"}}),
+			want:   systemSettingPolicyScope{roles: []string{model.SystemUserRoleId}},
+			empty:  true,
 		},
 		{
-			name:   "expression-only change affects users entering or leaving the match",
+			name:   "expression change covers both expressions",
 			before: version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{biometrics: {exprA, "true"}}),
 			after:  version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{biometrics: {exprB, "true"}}),
-			want:   systemSettingAffectedQueries{eitherSide: [][2]systemSettingMatchQuery{{user(exprA), user(exprB)}}},
+			want:   userScope(exprA, exprB),
 		},
 		{
-			name:   "expression change involving session attributes affects every match",
-			before: version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{biometrics: {exprA, "true"}}),
-			after:  version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{biometrics: {sessionA, "true"}}),
-			want:   systemSettingAffectedQueries{union: []systemSettingMatchQuery{user(exprA), user(sessionA)}},
-		},
-		{
-			name:   "value change affects every match",
+			name:   "value change covers the expression",
 			before: version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{biometrics: {exprA, "true"}}),
 			after:  version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{biometrics: {exprA, "false"}}),
-			want:   systemSettingAffectedQueries{union: []systemSettingMatchQuery{user(exprA), user(exprA)}},
+			want:   userScope(exprA),
 		},
 		{
-			name:   "role change affects matches under either role",
+			name: "only changed rules are covered",
+			before: version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{
+				biometrics: {exprA, "true"},
+				otherKey:   {exprB, "x"},
+			}),
+			after: version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{
+				biometrics: {exprA, "false"},
+				otherKey:   {exprB, "x"},
+			}),
+			want: userScope(exprA),
+		},
+		{
+			name:   "role change covers every rule under both roles",
 			before: version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{biometrics: {exprA, "true"}}),
 			after:  version(model.SystemAdminRoleId, map[string]systemSettingRuleVersion{biometrics: {exprA, "true"}}),
-			want: systemSettingAffectedQueries{union: []systemSettingMatchQuery{
-				user(exprA),
-				{expression: exprA, role: model.SystemAdminRoleId},
-			}},
+			want: systemSettingPolicyScope{
+				roles:       []string{model.SystemAdminRoleId, model.SystemUserRoleId},
+				expressions: []string{exprA},
+			},
 		},
 		{
-			name:   "added and removed rules affect their matches only",
+			name:   "added and removed rules are covered",
 			before: version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{biometrics: {exprA, "true"}}),
 			after:  version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{otherKey: {exprB, "x"}}),
-			want:   systemSettingAffectedQueries{union: []systemSettingMatchQuery{user(exprA), user(exprB)}},
+			want:   userScope(exprA, exprB),
 		},
 		{
-			name:  "create affects the new matches",
+			name:  "create covers the new rules",
 			after: version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{biometrics: {exprA, "true"}}),
-			want:  systemSettingAffectedQueries{union: []systemSettingMatchQuery{user(exprA)}},
+			want:  userScope(exprA),
 		},
 		{
-			name:   "delete affects the old matches",
+			name:   "delete covers the old rules",
 			before: version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{biometrics: {exprA, "true"}}),
-			want:   systemSettingAffectedQueries{union: []systemSettingMatchQuery{user(exprA)}},
+			want:   userScope(exprA),
+		},
+		{
+			name:   "a version without rules targets nobody",
+			before: version(model.SystemAdminRoleId, map[string]systemSettingRuleVersion{}),
+			after:  version(model.SystemUserRoleId, map[string]systemSettingRuleVersion{biometrics: {exprA, "true"}}),
+			want:   userScope(exprA),
 		},
 	}
 
@@ -457,7 +473,7 @@ func TestDiffSystemSettingPolicies(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			got := diffSystemSettingPolicies(tc.before, tc.after)
 			assert.Equal(t, tc.want, got)
-			assert.Equal(t, tc.want.empty(), got.empty())
+			assert.Equal(t, tc.empty, got.empty())
 		})
 	}
 
@@ -479,96 +495,110 @@ func TestDiffSystemSettingPolicies(t *testing.T) {
 	})
 }
 
-func TestSystemSettingPolicyMatcher(t *testing.T) {
-	th := Setup(t).InitBasic(t)
-
-	const expr = `user.attributes.dept == "a"`
-	member := th.BasicUser
-	admin := th.SystemAdminUser
-	guest := th.CreateGuest(t)
-	bot := th.CreateBot(t)
-	botUser, appErr := th.App.GetUser(th.Context, bot.UserId)
-	require.Nil(t, appErr)
-
-	newMatcher := func(users ...*model.User) (*systemSettingPolicyMatcher, *mocks.AccessControlServiceInterface) {
-		mockACS := &mocks.AccessControlServiceInterface{}
-		mockACS.On("QueryUsersForExpression", mock.Anything, expr, model.SubjectSearchOptions{Limit: systemSettingAffectedUsersPageSize, IgnoreCount: true}).
-			Return(users, int64(0), nil).Once()
-		return &systemSettingPolicyMatcher{app: th.App, acs: mockACS, rctx: th.Context}, mockACS
-	}
-	ids := func(users ...*model.User) map[string]struct{} {
-		set := map[string]struct{}{}
-		for _, u := range users {
-			set[u.Id] = struct{}{}
-		}
-		return set
-	}
-
-	t.Run("applies the policy role chain to matched users", func(t *testing.T) {
-		matcher, mockACS := newMatcher(member, admin, guest, botUser)
-
-		matched, appErr := matcher.matches(systemSettingMatchQuery{expression: expr, role: model.SystemUserRoleId})
-		require.Nil(t, appErr)
-		assert.Equal(t, ids(member, admin, botUser), matched, "system_admin falls back to system_user")
-
-		matched, appErr = matcher.matches(systemSettingMatchQuery{expression: expr, role: model.SystemAdminRoleId})
-		require.Nil(t, appErr)
-		assert.Equal(t, ids(admin), matched)
-
-		matched, appErr = matcher.matches(systemSettingMatchQuery{expression: expr, role: model.SystemGuestRoleId})
-		require.Nil(t, appErr)
-		assert.Equal(t, ids(guest), matched)
-
-		matched, appErr = matcher.matches(systemSettingMatchQuery{expression: expr, role: model.AccessControlPolicyRoleSystemBot})
-		require.Nil(t, appErr)
-		assert.Equal(t, ids(botUser), matched)
-
-		matched, appErr = matcher.matches(systemSettingMatchQuery{expression: expr})
-		require.Nil(t, appErr)
-		assert.Empty(t, matched)
-
-		mockACS.AssertExpectations(t)
-	})
-
-	t.Run("pages through matching users", func(t *testing.T) {
-		firstPage := make([]*model.User, systemSettingAffectedUsersPageSize)
-		for i := range firstPage {
-			firstPage[i] = &model.User{Id: model.NewId(), Roles: model.SystemUserRoleId}
-		}
-		last := firstPage[len(firstPage)-1]
-
-		mockACS := &mocks.AccessControlServiceInterface{}
-		mockACS.On("QueryUsersForExpression", mock.Anything, expr, model.SubjectSearchOptions{Limit: systemSettingAffectedUsersPageSize, IgnoreCount: true}).
-			Return(firstPage, int64(0), nil).Once()
-		mockACS.On("QueryUsersForExpression", mock.Anything, expr, model.SubjectSearchOptions{
-			Limit:       systemSettingAffectedUsersPageSize,
-			IgnoreCount: true,
-			Cursor:      model.SubjectCursor{TargetID: last.Id},
-		}).Return([]*model.User{member}, int64(0), nil).Once()
-		matcher := &systemSettingPolicyMatcher{app: th.App, acs: mockACS, rctx: th.Context}
-
-		matched, appErr := matcher.matches(systemSettingMatchQuery{expression: expr, role: model.SystemUserRoleId})
-		require.Nil(t, appErr)
-		assert.Len(t, matched, systemSettingAffectedUsersPageSize+1)
-		assert.Contains(t, matched, member.Id)
-		mockACS.AssertExpectations(t)
-	})
-
-	t.Run("reports query errors", func(t *testing.T) {
-		mockACS := &mocks.AccessControlServiceInterface{}
-		mockACS.On("QueryUsersForExpression", mock.Anything, expr, mock.Anything).
-			Return(nil, int64(0), model.NewAppError("QueryUsersForExpression", "app.pap.query_expression.app_error", nil, "", http.StatusNotImplemented))
-		matcher := &systemSettingPolicyMatcher{app: th.App, acs: mockACS, rctx: th.Context}
-
-		_, appErr := matcher.affectedUsers(systemSettingAffectedQueries{union: []systemSettingMatchQuery{{expression: expr, role: model.SystemUserRoleId}}})
-		require.NotNil(t, appErr)
-	})
+// failingSessionListStore fails every listing of unexpired sessions.
+type failingSessionListStore struct {
+	store.SessionStore
 }
 
-func TestSystemSettingPolicyChangePush(t *testing.T) {
-	th := Setup(t).InitBasic(t)
-	th.ConfigStore.SetReadOnlyFF(false)
+func (s *failingSessionListStore) GetUnexpiredSessions(request.CTX, store.UnexpiredSessionsOpts) ([]*model.Session, error) {
+	return nil, errors.New("listing failed")
+}
 
+type failingSessionListSessionsStore struct {
+	store.Store
+	sessions *failingSessionListStore
+}
+
+func (s *failingSessionListSessionsStore) Session() store.SessionStore {
+	return s.sessions
+}
+
+// systemSettingPolicyEngine stands in for the policy engine: it evaluates the
+// stored version of a policy, matching each rule expression against the user
+// or session IDs registered for it.
+type systemSettingPolicyEngine struct {
+	th *TestHelper
+
+	mu          sync.Mutex
+	matches     map[string]map[string]bool
+	failing     map[string]map[string]bool
+	evaluations map[string]int
+	queries     map[string]int
+}
+
+func (e *systemSettingPolicyEngine) match(expression string, ids ...string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	set := map[string]bool{}
+	for _, id := range ids {
+		set[id] = true
+	}
+	e.matches[expression] = set
+}
+
+func (e *systemSettingPolicyEngine) fail(expression, sessionID string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.failing[expression] = map[string]bool{sessionID: true}
+}
+
+func (e *systemSettingPolicyEngine) evaluationsOf(policyID string) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.evaluations[policyID]
+}
+
+func (e *systemSettingPolicyEngine) queriesOf(expression string) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.queries[expression]
+}
+
+func (e *systemSettingPolicyEngine) evaluate(rctx request.CTX, req model.AccessRequest) (model.AccessDecision, *model.AppError) {
+	policy, err := e.th.App.Srv().Store().AccessControlPolicy().Get(rctx, req.Resource.ID)
+	if err != nil {
+		return model.AccessDecision{}, nil
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.evaluations[req.Resource.ID]++
+	sessionID := rctx.Session().Id
+	for _, rule := range policy.Rules {
+		if rule.Actions[0] != req.Action {
+			continue
+		}
+		if e.failing[rule.Expression][sessionID] {
+			return model.AccessDecision{}, model.NewAppError("AccessEvaluation", "app.pap.access_evaluation.app_error", nil, "", http.StatusInternalServerError)
+		}
+		matched := e.matches[rule.Expression]
+		return model.AccessDecision{Decision: matched[req.Subject.ID] || matched[sessionID]}, nil
+	}
+	return model.AccessDecision{}, nil
+}
+
+func (e *systemSettingPolicyEngine) queryUsers(rctx request.CTX, expression string, _ model.SubjectSearchOptions) ([]*model.User, int64, *model.AppError) {
+	e.mu.Lock()
+	e.queries[expression]++
+	matched := e.matches[expression]
+	e.mu.Unlock()
+
+	if strings.Contains(expression, "unsearchable") {
+		return nil, 0, model.NewAppError("QueryUsersForExpression", "app.pap.query_expression.app_error", nil, "", http.StatusNotImplemented)
+	}
+	users := []*model.User{}
+	for id := range matched {
+		if user, err := e.th.App.Srv().Store().User().Get(rctx, id); err == nil {
+			users = append(users, user)
+		}
+	}
+	return users, int64(len(users)), nil
+}
+
+// enableSystemSettingPolicyEngine turns on system_setting policies backed by
+// a systemSettingPolicyEngine and returns it with a system admin context.
+func enableSystemSettingPolicyEngine(t *testing.T, th *TestHelper) (*systemSettingPolicyEngine, request.CTX) {
+	t.Helper()
 	require.True(t, th.App.Srv().SetLicense(model.NewTestLicenseSKU(model.LicenseShortSkuEnterpriseAdvanced)))
 	th.App.UpdateConfig(func(cfg *model.Config) {
 		cfg.FeatureFlags.AttributeValueMasking = false
@@ -576,58 +606,17 @@ func TestSystemSettingPolicyChangePush(t *testing.T) {
 		cfg.AccessControlSettings.EnableAttributeBasedAccessControl = new(true)
 	})
 
-	userA := th.BasicUser
-	userB := th.BasicUser2
-	userC := th.CreateUser(t)
-	usersByID := map[string]*model.User{userA.Id: userA, userB.Id: userB, userC.Id: userC}
-
-	const (
-		exprA      = `user.attributes.dept == "a"`
-		exprAB     = `user.attributes.dept == "ab"`
-		exprBC     = `user.attributes.dept == "bc"`
-		sessionAB  = `user.attributes.dept == "ab" && user.session.vpn_active == "true"`
-		sessionBC  = `user.attributes.dept == "bc" && user.session.vpn_active == "true"`
-		unsearched = `user.attributes.dept == "unsearchable"`
-	)
-	matches := map[string][]string{
-		exprA:      {userA.Id},
-		exprAB:     {userA.Id, userB.Id},
-		exprBC:     {userB.Id, userC.Id},
-		sessionAB:  {userA.Id, userB.Id},
-		sessionBC:  {userB.Id, userC.Id},
-		unsearched: {userA.Id},
+	engine := &systemSettingPolicyEngine{
+		th:          th,
+		matches:     map[string]map[string]bool{},
+		failing:     map[string]map[string]bool{},
+		evaluations: map[string]int{},
+		queries:     map[string]int{},
 	}
-
 	mockACS := &mocks.AccessControlServiceInterface{}
 	mockStoredSystemSettingPolicies(th, mockACS)
-	mockACS.On("AccessEvaluation", mock.Anything, mock.Anything).Return(
-		func(rctx request.CTX, req model.AccessRequest) (model.AccessDecision, *model.AppError) {
-			policy, err := th.App.Srv().Store().AccessControlPolicy().Get(rctx, req.Resource.ID)
-			if err != nil {
-				return model.AccessDecision{}, nil
-			}
-			for _, rule := range policy.Rules {
-				if rule.Actions[0] == req.Action {
-					return model.AccessDecision{Decision: slices.Contains(matches[rule.Expression], req.Subject.ID)}, nil
-				}
-			}
-			return model.AccessDecision{}, nil
-		},
-	).Maybe()
-	queryCalls := make(chan string, 100)
-	mockACS.On("QueryUsersForExpression", mock.Anything, mock.Anything, mock.Anything).Return(
-		func(_ request.CTX, expression string, _ model.SubjectSearchOptions) ([]*model.User, int64, *model.AppError) {
-			queryCalls <- expression
-			if expression == unsearched {
-				return nil, 0, model.NewAppError("QueryUsersForExpression", "app.pap.query_expression.app_error", nil, "", http.StatusNotImplemented)
-			}
-			users := []*model.User{}
-			for _, id := range matches[expression] {
-				users = append(users, usersByID[id])
-			}
-			return users, int64(len(users)), nil
-		},
-	).Maybe()
+	mockACS.On("AccessEvaluation", mock.Anything, mock.Anything).Return(engine.evaluate).Maybe()
+	mockACS.On("QueryUsersForExpression", mock.Anything, mock.Anything, mock.Anything).Return(engine.queryUsers).Maybe()
 	th.App.Srv().Channels().AccessControl = mockACS
 	t.Cleanup(func() {
 		th.App.Srv().Channels().AccessControl = nil
@@ -639,8 +628,39 @@ func TestSystemSettingPolicyChangePush(t *testing.T) {
 		UserId: th.SystemAdminUser.Id,
 		Roles:  th.SystemAdminUser.GetRawRoles(),
 	})
+	return engine, adminCtx
+}
+
+func biometricsPolicy(expression string) *model.AccessControlPolicy {
+	return &model.AccessControlPolicy{
+		Name:  "Biometrics " + model.NewId(),
+		Type:  model.AccessControlPolicyTypeSystemSetting,
+		Roles: []string{model.SystemUserRoleId},
+		Rules: []model.AccessControlPolicyRule{{
+			Actions:    []string{model.ClientConfigKeyMobileEnableBiometrics},
+			Expression: expression,
+			Value:      "true",
+		}},
+	}
+}
+
+func TestSystemSettingPolicyChangePush(t *testing.T) {
+	th := Setup(t).InitBasic(t)
+	th.ConfigStore.SetReadOnlyFF(false)
+
+	userA := th.BasicUser
+	userB := th.BasicUser2
+	userC := th.CreateUser(t)
+	engine, adminCtx := enableSystemSettingPolicyEngine(t, th)
+
 	biometrics := func(value string) map[string]any {
 		return map[string]any{model.ClientConfigKeyMobileEnableBiometrics: value}
+	}
+	storedExpression := func() string {
+		return `user.attributes.dept == "` + model.NewId() + `"`
+	}
+	sessionExpression := func() string {
+		return storedExpression() + ` || user.session.vpn_active == "true"`
 	}
 
 	type connections struct{ a, b, c chan *model.WebSocketEvent }
@@ -650,6 +670,12 @@ func TestSystemSettingPolicyChangePush(t *testing.T) {
 		c, _ := connectSystemSettingWebSocket(t, th, userC.Id)
 		return connections{a, b, c}
 	}
+	expectNothing := func(t *testing.T, channels ...chan *model.WebSocketEvent) {
+		t.Helper()
+		for _, messages := range channels {
+			expectNoSystemSettingEvent(t, messages)
+		}
+	}
 
 	save := func(t *testing.T, policy *model.AccessControlPolicy) *model.AccessControlPolicy {
 		t.Helper()
@@ -658,23 +684,21 @@ func TestSystemSettingPolicyChangePush(t *testing.T) {
 		require.Nil(t, appErr)
 		return saved
 	}
-	create := func(t *testing.T, expression, value string) *model.AccessControlPolicy {
+	createWithRole := func(t *testing.T, role, expression, value string) *model.AccessControlPolicy {
 		t.Helper()
-		saved := save(t, &model.AccessControlPolicy{
-			Name:  "Biometrics " + model.NewId(),
-			Type:  model.AccessControlPolicyTypeSystemSetting,
-			Roles: []string{model.SystemUserRoleId},
-			Rules: []model.AccessControlPolicyRule{{
-				Actions:    []string{model.ClientConfigKeyMobileEnableBiometrics},
-				Expression: expression,
-				Value:      value,
-			}},
-		})
+		policy := biometricsPolicy(expression)
+		policy.Roles = []string{role}
+		policy.Rules[0].Value = value
+		saved := save(t, policy)
 		t.Cleanup(func() {
 			_ = th.App.Srv().Store().AccessControlPolicy().Delete(th.Context, saved.ID)
 			th.App.invalidateSystemSettingPolicyCache()
 		})
 		return saved
+	}
+	create := func(t *testing.T, expression, value string) *model.AccessControlPolicy {
+		t.Helper()
+		return createWithRole(t, model.SystemUserRoleId, expression, value)
 	}
 	withRule := func(policy *model.AccessControlPolicy, expression, value string) *model.AccessControlPolicy {
 		updated := *policy
@@ -685,99 +709,212 @@ func TestSystemSettingPolicyChangePush(t *testing.T) {
 		}}
 		return &updated
 	}
-	drainQueries := func() {
-		for {
-			select {
-			case <-queryCalls:
-			default:
-				return
-			}
-		}
-	}
 
 	t.Run("create pushes to the new matches only", func(t *testing.T) {
 		conns := connectAll(t)
-		create(t, exprA, "true")
+		expression := storedExpression()
+		engine.match(expression, userA.Id)
+
+		create(t, expression, "true")
 
 		expectSystemSettingOverrides(t, conns.a, biometrics("true"))
-		expectNoSystemSettingEvent(t, conns.b)
-		expectNoSystemSettingEvent(t, conns.c)
+		expectNothing(t, conns.b, conns.c)
+		assert.Equal(t, 1, engine.queriesOf(expression), "expressions without session attributes narrow the sessions by user")
 	})
 
-	t.Run("rename-only save publishes nothing", func(t *testing.T) {
+	t.Run("rename-only save publishes nothing and evaluates nothing", func(t *testing.T) {
 		conns := connectAll(t)
-		policy := create(t, exprAB, "true")
+		expression := storedExpression()
+		engine.match(expression, userA.Id, userB.Id)
+		policy := create(t, expression, "true")
 		expectSystemSettingOverrides(t, conns.a, biometrics("true"))
 		expectSystemSettingOverrides(t, conns.b, biometrics("true"))
-		drainQueries()
+		evaluations := engine.evaluationsOf(policy.ID)
 
 		renamed := *policy
 		renamed.Name = "Renamed " + model.NewId()
 		save(t, &renamed)
 
-		expectNoSystemSettingEvent(t, conns.a)
-		expectNoSystemSettingEvent(t, conns.b)
-		expectNoSystemSettingEvent(t, conns.c)
-		assert.Empty(t, queryCalls, "a rename must not query users")
+		expectNothing(t, conns.a, conns.b, conns.c)
+		assert.Equal(t, evaluations, engine.evaluationsOf(policy.ID))
 	})
 
-	t.Run("expression-only change pushes to users entering or leaving the match", func(t *testing.T) {
+	t.Run("expression change pushes only to sessions whose overrides flipped", func(t *testing.T) {
 		conns := connectAll(t)
-		policy := create(t, exprAB, "true")
+		before, after := storedExpression(), storedExpression()
+		engine.match(before, userA.Id, userB.Id)
+		engine.match(after, userB.Id, userC.Id)
+		policy := create(t, before, "true")
 		expectSystemSettingOverrides(t, conns.a, biometrics("true"))
 		expectSystemSettingOverrides(t, conns.b, biometrics("true"))
 
-		save(t, withRule(policy, exprBC, "true"))
+		save(t, withRule(policy, after, "true"))
 
 		expectSystemSettingOverrides(t, conns.a, map[string]any{})
 		expectSystemSettingOverrides(t, conns.c, biometrics("true"))
-		expectNoSystemSettingEvent(t, conns.b)
+		expectNothing(t, conns.b)
 	})
 
-	t.Run("value change pushes to every old and new match", func(t *testing.T) {
+	t.Run("session attribute alternatives reach the matching session only", func(t *testing.T) {
+		matchedSession, matchedSessionID := connectSystemSettingWebSocket(t, th, userA.Id)
+		otherSession, _ := connectSystemSettingWebSocket(t, th, userA.Id)
+		b, _ := connectSystemSettingWebSocket(t, th, userB.Id)
+		c, _ := connectSystemSettingWebSocket(t, th, userC.Id)
+
+		before, after := storedExpression(), sessionExpression()
+		engine.match(before)
+		engine.match(after, matchedSessionID, userB.Id)
+		policy := create(t, before, "true")
+		expectNothing(t, matchedSession, otherSession, b, c)
+
+		save(t, withRule(policy, after, "true"))
+
+		expectSystemSettingOverrides(t, matchedSession, biometrics("true"))
+		expectSystemSettingOverrides(t, b, biometrics("true"))
+		expectNothing(t, otherSession, c)
+		assert.Zero(t, engine.queriesOf(after), "expressions reading session attributes must not narrow by user")
+	})
+
+	t.Run("targets sessions by their own roles rather than the stored user roles", func(t *testing.T) {
+		promoted := th.CreateUser(t)
+		demoted := th.SystemAdminUser
+		promotedFirst, _ := connectSystemSettingWebSocket(t, th, promoted.Id)
+		promotedSecond, _ := connectSystemSettingWebSocket(t, th, promoted.Id)
+		demotedSession, _ := connectSystemSettingWebSocket(t, th, demoted.Id)
+		_, err := th.App.Srv().Store().Session().UpdateRoles(promoted.Id, model.SystemUserRoleId+" "+model.SystemAdminRoleId)
+		require.NoError(t, err)
+		_, err = th.App.Srv().Store().Session().UpdateRoles(demoted.Id, model.SystemUserRoleId)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			_, _ = th.App.Srv().Store().Session().UpdateRoles(demoted.Id, demoted.Roles)
+		})
+
+		expression := storedExpression()
+		engine.match(expression, promoted.Id, demoted.Id)
+		createWithRole(t, model.SystemAdminRoleId, expression, "true")
+
+		expectSystemSettingOverrides(t, promotedFirst, biometrics("true"))
+		expectSystemSettingOverrides(t, promotedSecond, biometrics("true"))
+		expectNothing(t, demotedSession)
+	})
+
+	t.Run("value change pushes to every match", func(t *testing.T) {
 		conns := connectAll(t)
-		policy := create(t, exprAB, "true")
+		expression := sessionExpression()
+		engine.match(expression, userA.Id, userB.Id)
+		policy := create(t, expression, "true")
 		expectSystemSettingOverrides(t, conns.a, biometrics("true"))
 		expectSystemSettingOverrides(t, conns.b, biometrics("true"))
 
-		save(t, withRule(policy, exprAB, "false"))
+		save(t, withRule(policy, expression, "false"))
 
 		expectSystemSettingOverrides(t, conns.a, biometrics("false"))
 		expectSystemSettingOverrides(t, conns.b, biometrics("false"))
-		expectNoSystemSettingEvent(t, conns.c)
+		expectNothing(t, conns.c)
 	})
 
-	t.Run("expression change with session attributes pushes to every old and new match", func(t *testing.T) {
+	t.Run("a change that keeps every result pushes nothing", func(t *testing.T) {
 		conns := connectAll(t)
-		policy := create(t, sessionAB, "true")
+		before, after := sessionExpression(), sessionExpression()
+		engine.match(before, userA.Id)
+		engine.match(after, userA.Id)
+		policy := create(t, before, "true")
 		expectSystemSettingOverrides(t, conns.a, biometrics("true"))
-		expectSystemSettingOverrides(t, conns.b, biometrics("true"))
+		evaluations := engine.evaluationsOf(policy.ID)
 
-		save(t, withRule(policy, sessionBC, "true"))
+		save(t, withRule(policy, after, "true"))
 
-		expectSystemSettingOverrides(t, conns.a, map[string]any{})
-		expectSystemSettingOverrides(t, conns.b, biometrics("true"))
-		expectSystemSettingOverrides(t, conns.c, biometrics("true"))
+		expectNothing(t, conns.a, conns.b, conns.c)
+		assert.Greater(t, engine.evaluationsOf(policy.ID), evaluations)
 	})
 
 	t.Run("delete pushes to the old matches", func(t *testing.T) {
 		conns := connectAll(t)
-		policy := create(t, exprA, "true")
+		expression := sessionExpression()
+		engine.match(expression, userA.Id)
+		policy := create(t, expression, "true")
 		expectSystemSettingOverrides(t, conns.a, biometrics("true"))
 
 		require.Nil(t, th.App.DeleteAccessControlPolicy(adminCtx, policy.ID))
 
 		expectSystemSettingOverrides(t, conns.a, map[string]any{})
-		expectNoSystemSettingEvent(t, conns.b)
-		expectNoSystemSettingEvent(t, conns.c)
+		expectNothing(t, conns.b, conns.c)
 	})
 
-	t.Run("query error falls back to re-evaluating every connection", func(t *testing.T) {
+	t.Run("a failed user query evaluates every targeted session", func(t *testing.T) {
 		conns := connectAll(t)
-		create(t, unsearched, "true")
+		expression := `user.attributes.dept == "unsearchable"`
+		engine.match(expression, userB.Id)
 
-		expectSystemSettingOverrides(t, conns.a, biometrics("true"))
-		expectSystemSettingOverrides(t, conns.b, map[string]any{})
-		expectSystemSettingOverrides(t, conns.c, map[string]any{})
+		create(t, expression, "true")
+
+		expectSystemSettingOverrides(t, conns.b, biometrics("true"))
+		expectNothing(t, conns.a, conns.c)
 	})
+
+	t.Run("a failed evaluation after the change skips that session", func(t *testing.T) {
+		failing, failingSessionID := connectSystemSettingWebSocket(t, th, userA.Id)
+		b, _ := connectSystemSettingWebSocket(t, th, userB.Id)
+		before, after := sessionExpression(), sessionExpression()
+		engine.match(before, userA.Id, userB.Id)
+		engine.match(after, userA.Id, userB.Id)
+		engine.fail(after, failingSessionID)
+		policy := create(t, before, "true")
+		expectSystemSettingOverrides(t, failing, biometrics("true"))
+		expectSystemSettingOverrides(t, b, biometrics("true"))
+
+		save(t, withRule(policy, after, "false"))
+
+		expectSystemSettingOverrides(t, b, biometrics("false"))
+		expectNothing(t, failing)
+	})
+
+	t.Run("publishes nothing when the feature is off", func(t *testing.T) {
+		conns := connectAll(t)
+		before, after := sessionExpression(), sessionExpression()
+		engine.match(before, userA.Id)
+		engine.match(after, userB.Id)
+		policy := create(t, before, "true")
+		expectSystemSettingOverrides(t, conns.a, biometrics("true"))
+		evaluations := engine.evaluationsOf(policy.ID)
+
+		th.App.UpdateConfig(func(cfg *model.Config) { cfg.FeatureFlags.SystemSettingPolicies = false })
+		t.Cleanup(func() {
+			th.App.UpdateConfig(func(cfg *model.Config) { cfg.FeatureFlags.SystemSettingPolicies = true })
+		})
+
+		save(t, withRule(policy, after, "true"))
+		require.Nil(t, th.App.DeleteAccessControlPolicy(adminCtx, policy.ID))
+
+		expectNothing(t, conns.a, conns.b, conns.c)
+		assert.Equal(t, evaluations, engine.evaluationsOf(policy.ID))
+	})
+}
+
+func TestSystemSettingPolicyChangePushListingFailure(t *testing.T) {
+	th := Setup(t).InitBasic(t)
+	th.ConfigStore.SetReadOnlyFF(false)
+
+	originalStore := th.App.Srv().Store()
+	th.App.Srv().SetStore(&failingSessionListSessionsStore{
+		Store:    originalStore,
+		sessions: &failingSessionListStore{SessionStore: originalStore.Session()},
+	})
+	t.Cleanup(func() { th.App.Srv().SetStore(originalStore) })
+
+	engine, adminCtx := enableSystemSettingPolicyEngine(t, th)
+	matched, _ := connectSystemSettingWebSocket(t, th, th.BasicUser.Id)
+	unmatched, _ := connectSystemSettingWebSocket(t, th, th.BasicUser2.Id)
+
+	expression := `user.attributes.dept == "a" || user.session.vpn_active == "true"`
+	engine.match(expression, th.BasicUser.Id)
+	saved, appErr := th.App.CreateOrUpdateAccessControlPolicy(adminCtx, biometricsPolicy(expression))
+	require.Nil(t, appErr)
+	t.Cleanup(func() {
+		_ = originalStore.AccessControlPolicy().Delete(th.Context, saved.ID)
+		th.App.invalidateSystemSettingPolicyCache()
+	})
+
+	expectSystemSettingOverrides(t, matched, map[string]any{model.ClientConfigKeyMobileEnableBiometrics: "true"})
+	expectSystemSettingOverrides(t, unmatched, map[string]any{})
 }
