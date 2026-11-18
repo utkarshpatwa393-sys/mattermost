@@ -115,16 +115,40 @@ func (a *App) goPushClientConfigOverrides(userID, sessionID string, force bool) 
 // connection picks the entry for its own session in
 // systemSettingOverridesBySessionBroadcastHook, so other nodes never evaluate
 // against attribute data they may not have caught up on yet.
+//
+// Each session is read from the master because the push may follow a write
+// that a replica has not caught up on yet, such as a role change or a new
+// session. The store's GetSessions always reads from a replica, so it only
+// lists the session IDs.
 func (a *App) pushClientConfigOverridesForUser(rctx request.CTX, userID, sessionID string, force bool) {
-	sessions, appErr := a.GetSessions(rctx, userID)
-	if appErr != nil {
-		rctx.Logger().Warn("Failed to load sessions for client config override push", mlog.String("user_id", userID), mlog.Err(appErr))
-		return
+	sessionIDs := []string{sessionID}
+	if sessionID == "" {
+		listed, appErr := a.GetSessions(rctx, userID)
+		if appErr != nil {
+			rctx.Logger().Warn("Failed to load sessions for client config override push", mlog.String("user_id", userID), mlog.Err(appErr))
+			return
+		}
+		sessionIDs = make([]string, 0, len(listed))
+		for _, session := range listed {
+			sessionIDs = append(sessionIDs, session.Id)
+		}
 	}
 
-	overridesBySession := make(map[string]map[string]string, len(sessions))
-	for _, session := range sessions {
-		if session.IsExpired() || (sessionID != "" && session.Id != sessionID) {
+	masterCtx := RequestContextWithMaster(rctx)
+	overridesBySession := make(map[string]map[string]string, len(sessionIDs))
+	for _, id := range sessionIDs {
+		session, err := a.Srv().Store().Session().Get(masterCtx, id)
+		if err != nil {
+			if !isNotFoundError(err) {
+				rctx.Logger().Warn("Failed to load session for client config override push",
+					mlog.String("user_id", userID),
+					mlog.String("session_id", id),
+					mlog.Err(err),
+				)
+			}
+			continue
+		}
+		if session.UserId != userID || session.IsExpired() {
 			continue
 		}
 

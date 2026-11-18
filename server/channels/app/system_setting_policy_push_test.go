@@ -6,6 +6,7 @@ package app
 import (
 	"net/http"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/mattermost/mattermost/server/public/model"
 	"github.com/mattermost/mattermost/server/public/plugin/plugintest/mock"
 	"github.com/mattermost/mattermost/server/public/shared/request"
+	"github.com/mattermost/mattermost/server/v8/channels/store"
 	"github.com/mattermost/mattermost/server/v8/einterfaces/mocks"
 )
 
@@ -275,6 +277,108 @@ func TestClientConfigOverridesPush(t *testing.T) {
 		require.Nil(t, appErr)
 		expectNothing(t, messages)
 	})
+}
+
+// replicaLagSessionStore simulates a read replica that has not yet received a
+// role change: sessions read without pinning the master report the user's
+// previous roles.
+type replicaLagSessionStore struct {
+	store.SessionStore
+
+	mu         sync.Mutex
+	staleRoles map[string]string
+}
+
+func (s *replicaLagSessionStore) setStaleRoles(userID, roles string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.staleRoles = map[string]string{userID: roles}
+}
+
+func (s *replicaLagSessionStore) applyLag(rctx request.CTX, sessions ...*model.Session) {
+	if store.HasMaster(rctx.Context()) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, session := range sessions {
+		if roles, ok := s.staleRoles[session.UserId]; ok {
+			session.Roles = roles
+		}
+	}
+}
+
+func (s *replicaLagSessionStore) Get(rctx request.CTX, sessionIDOrToken string) (*model.Session, error) {
+	session, err := s.SessionStore.Get(rctx, sessionIDOrToken)
+	if err == nil {
+		s.applyLag(rctx, session)
+	}
+	return session, err
+}
+
+func (s *replicaLagSessionStore) GetSessions(rctx request.CTX, userID string) ([]*model.Session, error) {
+	sessions, err := s.SessionStore.GetSessions(rctx, userID)
+	if err == nil {
+		s.applyLag(rctx, sessions...)
+	}
+	return sessions, err
+}
+
+type replicaLagSessionsStore struct {
+	store.Store
+	sessions *replicaLagSessionStore
+}
+
+func (s *replicaLagSessionsStore) Session() store.SessionStore {
+	return s.sessions
+}
+
+func TestClientConfigOverridesPushReadsSessionsFromMaster(t *testing.T) {
+	th := Setup(t).InitBasic(t)
+	th.ConfigStore.SetReadOnlyFF(false)
+
+	originalStore := th.App.Srv().Store()
+	lagging := &replicaLagSessionStore{SessionStore: originalStore.Session()}
+	th.App.Srv().SetStore(&replicaLagSessionsStore{Store: originalStore, sessions: lagging})
+	t.Cleanup(func() { th.App.Srv().SetStore(originalStore) })
+
+	require.True(t, th.App.Srv().SetLicense(model.NewTestLicenseSKU(model.LicenseShortSkuEnterpriseAdvanced)))
+	th.App.UpdateConfig(func(cfg *model.Config) {
+		cfg.FeatureFlags.SystemSettingPolicies = true
+		cfg.AccessControlSettings.EnableAttributeBasedAccessControl = new(true)
+	})
+
+	mockACS := &mocks.AccessControlServiceInterface{}
+	mockACS.On("AccessEvaluation", mock.Anything, mock.Anything).Return(model.AccessDecision{Decision: true}, nil).Maybe()
+	th.App.Srv().Channels().AccessControl = mockACS
+
+	saved, err := originalStore.AccessControlPolicy().Save(th.Context, &model.AccessControlPolicy{
+		ID:      model.NewId(),
+		Name:    "Biometrics",
+		Type:    model.AccessControlPolicyTypeSystemSetting,
+		Version: model.AccessControlPolicyVersionV0_3,
+		Roles:   []string{model.SystemAdminRoleId},
+		Rules: []model.AccessControlPolicyRule{{
+			Actions:    []string{model.ClientConfigKeyMobileEnableBiometrics},
+			Expression: "true",
+			Value:      "true",
+		}},
+	})
+	require.NoError(t, err)
+	th.App.invalidateSystemSettingPolicyCache()
+	t.Cleanup(func() {
+		_ = originalStore.AccessControlPolicy().Delete(th.Context, saved.ID)
+		th.App.invalidateSystemSettingPolicyCache()
+		th.App.Srv().Channels().AccessControl = nil
+	})
+
+	messages, _ := connectSystemSettingWebSocket(t, th, th.BasicUser.Id)
+	lagging.setStaleRoles(th.BasicUser.Id, th.BasicUser.Roles)
+
+	_, appErr := th.App.UpdateUserRoles(th.Context, th.BasicUser.Id, model.SystemUserRoleId+" "+model.SystemAdminRoleId, false)
+	require.Nil(t, appErr)
+
+	expectSystemSettingOverrides(t, messages, map[string]any{model.ClientConfigKeyMobileEnableBiometrics: "true"})
 }
 
 func TestDiffSystemSettingPolicies(t *testing.T) {
