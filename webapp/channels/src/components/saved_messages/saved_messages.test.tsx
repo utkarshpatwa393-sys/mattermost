@@ -14,7 +14,7 @@ import {popoutRhsSearch} from 'utils/popouts/popout_windows';
 import {TestHelper} from 'utils/test_helper';
 
 jest.mock('actions/views/rhs', () => ({
-    getMoreFlaggedPosts: jest.fn(() => ({type: 'MOCK_GET_MORE_FLAGGED_POSTS'})),
+    getMoreFlaggedPosts: jest.fn(() => () => Promise.resolve({data: true})),
 }));
 
 jest.mock('utils/popouts/popout_windows', () => ({
@@ -113,6 +113,19 @@ describe('components/SavedMessages', () => {
         expect(screen.queryByText('No saved messages yet')).toBeNull();
         expect(container.querySelector('.loading-screen')).not.toBeNull();
         await waitFor(() => expect(getMoreFlaggedPosts).toHaveBeenCalled());
+    });
+
+    test('should offer a retry when the next page fails to load', async () => {
+        jest.mocked(getMoreFlaggedPosts).mockReturnValueOnce(() => Promise.resolve({data: false}));
+        renderWithContext(<SavedMessages/>, stateWith({entities: {search: {flaggedPaging: {isEnd: false}}}}));
+
+        expect(await screen.findByText("Couldn't load more messages.")).toBeInTheDocument();
+        expect(getMoreFlaggedPosts).toHaveBeenCalledTimes(1);
+
+        screen.getByRole('button', {name: 'Try again'}).click();
+
+        await waitFor(() => expect(screen.queryByText("Couldn't load more messages.")).toBeNull());
+        expect(getMoreFlaggedPosts).toHaveBeenCalledTimes(2);
     });
 
     test('should not load more at the end of the list', async () => {

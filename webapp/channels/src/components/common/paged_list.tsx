@@ -3,9 +3,14 @@
 
 import debounce from 'lodash/debounce';
 import React, {forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef} from 'react';
+import {FormattedMessage} from 'react-intl';
+
+import {Button} from '@mattermost/shared/components/button';
 
 import Scrollbars from 'components/common/scrollbars';
 import LoadingSpinner from 'components/widgets/loading/loading_spinner';
+
+import './paged_list.scss';
 
 const LOAD_MORE_BUFFER = 30;
 const LOAD_MORE_DEBOUNCE = 100;
@@ -23,6 +28,9 @@ type Props = {
 
     /** Keep loading pages until the list overflows the viewport, for lists whose pages can come back short or empty. */
     loadUntilFull?: boolean;
+
+    /** Why the last page failed to load. Shown with a retry button in place of the spinner, and stops automatic loading until cleared. */
+    loadMoreError?: React.ReactNode;
 };
 
 const PagedList = forwardRef<HTMLDivElement, Props>(({
@@ -31,6 +39,7 @@ const PagedList = forwardRef<HTMLDivElement, Props>(({
     isLoadingMore,
     onLoadMore,
     loadUntilFull = false,
+    loadMoreError,
 }, ref) => {
     const scrollbars = useRef<HTMLDivElement>(null);
     useImperativeHandle(ref, () => scrollbars.current as HTMLDivElement, []);
@@ -44,7 +53,7 @@ const PagedList = forwardRef<HTMLDivElement, Props>(({
 
     // Measured from the top of the loading spinner, so that seeing the spinner is enough to load the next page.
     const loadMoreIfNearEnd = () => {
-        if (!hasMore || isLoadingMore || !scrollbars.current) {
+        if (!hasMore || isLoadingMore || loadMoreError || !scrollbars.current) {
             return;
         }
 
@@ -58,8 +67,6 @@ const PagedList = forwardRef<HTMLDivElement, Props>(({
     loadMoreIfNearEndRef.current = loadMoreIfNearEnd;
     const onScroll = useCallback(() => loadMoreIfNearEndRef.current(), []);
 
-    // Checking on resize rather than on every render means a failed page isn't retried until the list or the
-    // viewport changes size, or the user scrolls.
     useEffect(() => {
         const scrollable = scrollbars.current;
         if (!loadUntilFull || !scrollable) {
@@ -82,7 +89,26 @@ const PagedList = forwardRef<HTMLDivElement, Props>(({
             onScroll={onScroll}
         >
             {children}
-            {hasMore && (
+            {hasMore && loadMoreError && (
+                <div
+                    className='PagedList__error'
+                    role='alert'
+                >
+                    <span>{loadMoreError}</span>
+                    <Button
+                        type='button'
+                        emphasis='tertiary'
+                        size='sm'
+                        onClick={() => onLoadMoreRef.current()}
+                    >
+                        <FormattedMessage
+                            id='paged_list.retry'
+                            defaultMessage='Try again'
+                        />
+                    </Button>
+                </div>
+            )}
+            {hasMore && !loadMoreError && (
                 <div
                     ref={loader}
                     className='loading-screen'

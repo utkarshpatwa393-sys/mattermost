@@ -82,6 +82,7 @@ describe('components/common/PagedList', () => {
     test.each([
         ['there is nothing more', {hasMore: false}],
         ['a page is already loading', {isLoadingMore: true}],
+        ['the last page failed', {loadMoreError: 'Failed'}],
     ])('should not load more when %s', (_, props) => {
         const {onLoadMore, scroller} = renderPagedList(props);
 
@@ -135,6 +136,19 @@ describe('components/common/PagedList', () => {
 
         resize();
         expect(onLoadMore).toHaveBeenCalledTimes(2);
+    });
+
+    test('should offer a retry instead of the spinner after a page fails', () => {
+        const {onLoadMore, container, getByRole} = renderPagedList({loadUntilFull: true, loadMoreError: 'Failed to load'});
+
+        expect(container.querySelector('.loading-screen')).toBeNull();
+        expect(getByRole('alert')).toHaveTextContent('Failed to load');
+
+        resize();
+        expect(onLoadMore).not.toHaveBeenCalled();
+
+        fireEvent.click(getByRole('button', {name: 'Try again'}));
+        expect(onLoadMore).toHaveBeenCalledTimes(1);
     });
 
     test('should show the loading spinner only while there is more to load', () => {

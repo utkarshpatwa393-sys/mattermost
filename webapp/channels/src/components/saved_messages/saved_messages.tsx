@@ -2,7 +2,7 @@
 // See LICENSE.txt for license information.
 
 import classNames from 'classnames';
-import React, {useCallback, useMemo} from 'react';
+import React, {useCallback, useMemo, useState} from 'react';
 import {defineMessage, FormattedMessage, useIntl} from 'react-intl';
 import {useDispatch, useSelector} from 'react-redux';
 
@@ -65,8 +65,11 @@ const SavedMessages = ({isOpened = true, isSideBarExpanded = false}: Props) => {
     const noResults = items.length === 0;
     const hasMore = !isLoading && !isEnd;
 
-    const loadMore = useCallback(() => {
-        dispatch(getMoreFlaggedPosts());
+    const [loadMoreFailed, setLoadMoreFailed] = useState(false);
+    const loadMore = useCallback(async () => {
+        setLoadMoreFailed(false);
+        const result = await dispatch(getMoreFlaggedPosts());
+        setLoadMoreFailed(!result.data);
     }, [dispatch]);
 
     const newWindowHandler = useCallback(() => {
@@ -155,6 +158,12 @@ const SavedMessages = ({isOpened = true, isSideBarExpanded = false}: Props) => {
                 isLoadingMore={isLoadingMore}
                 onLoadMore={loadMore}
                 loadUntilFull={true}
+                loadMoreError={loadMoreFailed && (
+                    <FormattedMessage
+                        id='saved_messages.load_more_failed'
+                        defaultMessage="Couldn't load more messages."
+                    />
+                )}
             >
                 <div
                     id='search-items-container'
